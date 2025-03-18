@@ -1,0 +1,491 @@
+// Question 1
+#include <mpi.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+#define TOTAL_POINTS 1000000  // Total number of points
+
+int main(int argc, char** argv) {
+    int process_rank, num_processes;
+    long long local_inside_circle = 0, total_inside_circle;
+    
+    MPI_Init(&argc, &argv);
+    MPI_Comm_rank(MPI_COMM_WORLD, &process_rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &num_processes);
+
+    long long points_per_process = TOTAL_POINTS / num_processes;
+    srand(process_rank);  // Different seed for each process
+
+    for (long long i = 0; i < points_per_process; i++) {
+        double x_coord = (double)rand() / RAND_MAX;
+        double y_coord = (double)rand() / RAND_MAX;
+        if (x_coord * x_coord + y_coord * y_coord <= 1.0) {
+            local_inside_circle++;
+        }
+    }
+
+    // Reduce all counts to rank 0
+    MPI_Reduce(&local_inside_circle, &total_inside_circle, 1, MPI_LONG_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
+
+    if (process_rank == 0) {
+        double pi_estimate = (4.0 * total_inside_circle) / TOTAL_POINTS;
+        printf("Estimated PI = %f\n", pi_estimate);
+    }
+
+    MPI_Finalize();
+    return 0;
+}
+
+
+
+
+
+
+// Question 2
+#include <mpi.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+#include <omp.h>
+
+#define N 70
+
+void serial_matrix_multiplication(double A[N][N], double B[N][N], double C[N][N]) {
+    for (int i = 0; i < N; i++) {
+        for (int j = 0; j < N; j++) {
+            C[i][j] = 0.0;
+            for (int k = 0; k < N; k++) {
+                C[i][j] += A[i][k] * B[k][j];
+            }
+        }
+    }
+}
+
+void parallel_matrix_multiplication(double A[N][N], double B[N][N], double C[N][N], int rank, int size) {
+    int rows_per_proc = N / size;
+    double local_C[rows_per_proc][N];
+
+    MPI_Scatter(A, rows_per_proc * N, MPI_DOUBLE, local_C, rows_per_proc * N, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    MPI_Bcast(B, N * N, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+
+    for (int i = 0; i < rows_per_proc; i++) {
+        for (int j = 0; j < N; j++) {
+            local_C[i][j] = 0.0;
+            for (int k = 0; k < N; k++) {
+                local_C[i][j] += A[i][k] * B[k][j];
+            }
+        }
+    }
+
+    MPI_Gather(local_C, rows_per_proc * N, MPI_DOUBLE, C, rows_per_proc * N, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+}
+
+int main(int argc, char* argv[]) {
+    int rank, size;
+    double A[N][N], B[N][N], C[N][N];
+
+    MPI_Init(&argc, &argv);
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    if (rank == 0) {
+        srand(time(NULL));
+        for (int i = 0; i < N; i++) {
+            for (int j = 0; j < N; j++) {
+                A[i][j] = rand() % 10;
+                B[i][j] = rand() % 10;
+            }
+        }
+
+        double start_time = omp_get_wtime();
+        serial_matrix_multiplication(A, B, C);
+        double serial_time = omp_get_wtime() - start_time;
+
+        printf("Serial Execution Time: %f seconds\n", serial_time);
+    }
+
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    double start_time = omp_get_wtime();
+    parallel_matrix_multiplication(A, B, C, rank, size);
+    double parallel_time = omp_get_wtime() - start_time;
+
+    if (rank == 0) {
+        printf("Parallel Execution Time: %f seconds\n", parallel_time);
+    }
+
+    MPI_Finalize();
+    return 0;
+}
+
+
+
+// Question 3
+#include <stdio.h>
+#include <stdlib.h>
+#include <mpi.h>
+#include <time.h>
+
+#define ARRAY_SIZE 16  // Must be divisible by number of processes
+
+// Swap function
+void swap(int *a, int *b) {
+    int temp = *a;
+    *a = *b;
+    *b = temp;
+}
+
+// Comparison function for qsort
+int compare(const void *a, const void *b) {
+    return (*(int *)a - *(int *)b);
+}
+
+// Parallel Odd-Even Transposition Sort
+void parallel_odd_even_sort(int *local_array, int local_size, int rank, int size) {
+    int phase, partner;
+    for (phase = 0; phase < size; phase++) {
+        if (phase % 2 == 0) {  // Even phase
+            partner = (rank % 2 == 0) ? rank + 1 : rank - 1;
+        } else {  // Odd phase
+            partner = (rank % 2 == 0) ? rank - 1 : rank + 1;
+        }
+
+        if (partner >= 0 && partner < size) {
+            int *recv_array = (int *)malloc(local_size * sizeof(int));
+            MPI_Sendrecv(local_array, local_size, MPI_INT, partner, 0,
+                         recv_array, local_size, MPI_INT, partner, 0,
+                         MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+
+            // Merge received array with local array
+            int merged_size = 2 * local_size;
+            int *merged_array = (int *)malloc(merged_size * sizeof(int));
+            int i = 0, j = 0, k = 0;
+
+            while (i < local_size && j < local_size) {
+                if (local_array[i] < recv_array[j]) {
+                    merged_array[k++] = local_array[i++];
+                } else {
+                    merged_array[k++] = recv_array[j++];
+                }
+            }
+
+            while (i < local_size) merged_array[k++] = local_array[i++];
+            while (j < local_size) merged_array[k++] = recv_array[j++];
+
+            // Keep the smaller half if lower rank, larger half if higher rank
+            if (rank < partner) {
+                for (i = 0; i < local_size; i++) {
+                    local_array[i] = merged_array[i];
+                }
+            } else {
+                for (i = 0; i < local_size; i++) {
+                    local_array[i] = merged_array[i + local_size];
+                }
+            }
+
+            free(recv_array);
+            free(merged_array);
+        }
+    }
+}
+
+int main(int argc, char **argv) {
+    int rank, size;
+    int *global_array = NULL;
+    int *local_array;
+    int local_size;
+    double start_time, end_time;
+
+    MPI_Init(&argc, &argv);
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    // Ensure ARRAY_SIZE is divisible by number of processes
+    if (ARRAY_SIZE % size != 0) {
+        if (rank == 0) {
+            printf("Error: ARRAY_SIZE must be divisible by number of processes.\n");
+        }
+        MPI_Finalize();
+        return -1;
+    }
+
+    local_size = ARRAY_SIZE / size;
+    local_array = (int *)malloc(local_size * sizeof(int));
+
+    if (rank == 0) {
+        global_array = (int *)malloc(ARRAY_SIZE * sizeof(int));
+        srand(time(NULL));
+
+        // Initialize and print unsorted array
+        printf("Unsorted array:\n");
+        for (int i = 0; i < ARRAY_SIZE; i++) {
+            global_array[i] = rand() % 100;
+            printf("%d ", global_array[i]);
+        }
+        printf("\n");
+    }
+
+    // Start timing
+    MPI_Barrier(MPI_COMM_WORLD);
+    start_time = MPI_Wtime();
+
+    // Scatter data to processes
+    MPI_Scatter(global_array, local_size, MPI_INT, local_array, local_size, MPI_INT, 0, MPI_COMM_WORLD);
+
+    // Local sorting using qsort
+    qsort(local_array, local_size, sizeof(int), compare);
+
+    // Perform parallel sorting
+    parallel_odd_even_sort(local_array, local_size, rank, size);
+
+    // Gather sorted data back
+    MPI_Gather(local_array, local_size, MPI_INT, global_array, local_size, MPI_INT, 0, MPI_COMM_WORLD);
+
+    // Stop timing
+    end_time = MPI_Wtime();
+
+    // Print sorted array
+    if (rank == 0) {
+        printf("Sorted array:\n");
+        for (int i = 0; i < ARRAY_SIZE; i++) {
+            printf("%d ", global_array[i]);
+        }
+        printf("\nExecution Time: %f seconds\n", end_time - start_time);
+        free(global_array);
+    }
+
+    free(local_array);
+    MPI_Finalize();
+    return 0;
+}
+
+
+
+
+// Question 4
+
+#include <mpi.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <math.h>
+
+#define N 10  // Grid size (NxN)
+#define ITERATIONS 1000  // Number of iterations
+#define TOLERANCE 0.0001 // Convergence tolerance
+void initialize_grid(double grid[N][N]) {
+    for (int i = 0; i < N; i++) {
+        for (int j = 0; j < N; j++) {
+            if (i == 0 || i == N - 1 || j == 0 || j == N - 1)
+                grid[i][j] = 100.0;  // Set boundary temperatures
+            else
+                grid[i][j] = 0.0;  // Interior points start at 0
+        }
+    }
+}
+
+void print_grid(double grid[N][N]) {
+    for (int i = 0; i < N; i++) {
+        for (int j = 0; j < N; j++)
+            printf("%.2f ", grid[i][j]);
+        printf("\n");
+    }
+}
+
+int main(int argc, char** argv) {
+    int rank, size;
+    MPI_Init(&argc, &argv);
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    int rows_per_proc = N / size; 
+    double grid[N][N], new_grid[N][N];
+
+    if (rank == 0) {
+        initialize_grid(grid);
+    }
+
+    MPI_Bcast(grid, N * N, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+
+    int start_row = rank * rows_per_proc;
+    int end_row = (rank == size - 1) ? N - 1 : start_row + rows_per_proc;
+
+    double start_time = MPI_Wtime();
+
+    for (int iter = 0; iter < ITERATIONS; iter++) {
+        for (int i = start_row; i < end_row; i++) {
+            for (int j = 1; j < N - 1; j++) {  
+                new_grid[i][j] = 0.25 * (grid[i - 1][j] + grid[i + 1][j] + 
+                                         grid[i][j - 1] + grid[i][j + 1]);
+            }
+        }
+        if (rank > 0)
+            MPI_Sendrecv(&new_grid[start_row][0], N, MPI_DOUBLE, rank - 1, 0,
+                         &new_grid[start_row - 1][0], N, MPI_DOUBLE, rank - 1, 0,
+                         MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        if (rank < size - 1)
+            MPI_Sendrecv(&new_grid[end_row - 1][0], N, MPI_DOUBLE, rank + 1, 0,
+                         &new_grid[end_row][0], N, MPI_DOUBLE, rank + 1, 0,
+                         MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+
+        for (int i = start_row; i < end_row; i++)
+            for (int j = 0; j < N; j++)
+                grid[i][j] = new_grid[i][j];
+    }
+
+    double end_time = MPI_Wtime();
+    if (rank == 0) {
+        printf("Final Heat Distribution:\n");
+        print_grid(grid);
+        printf("Execution Time: %f seconds\n", end_time - start_time);
+    }
+    MPI_Finalize();
+    return 0;
+}
+
+
+
+
+
+
+
+
+// Question 5
+#include <mpi.h>
+#include <stdio.h>
+
+int main(int argc, char* argv[]) {
+    int rank, size, value, result;
+
+    MPI_Init(&argc, &argv);
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    value = rank + 1; // Example value
+    MPI_Reduce(&value, &result, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
+
+    if (rank == 0) printf("Sum of all ranks = %d\n", result);
+
+    MPI_Finalize();
+    return 0;
+}
+
+
+
+// Question 6
+
+#include <mpi.h>
+#include <stdio.h>
+
+#define VECTOR_SIZE 100
+
+int main(int argc, char* argv[]) {
+    int process_rank, num_processes;
+    double local_dot_product = 0, total_dot_product = 0;
+    double vector_A[VECTOR_SIZE], vector_B[VECTOR_SIZE];
+
+    MPI_Init(&argc, &argv);
+    MPI_Comm_rank(MPI_COMM_WORLD, &process_rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &num_processes);
+
+    int elements_per_process = VECTOR_SIZE / num_processes;
+    for (int i = 0; i < elements_per_process; i++) {
+        vector_A[i] = 1.0;  // Example values
+        vector_B[i] = 1.0;
+        local_dot_product += vector_A[i] * vector_B[i];
+    }
+
+    MPI_Reduce(&local_dot_product, &total_dot_product, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    if (process_rank == 0) printf("Dot Product = %lf\n", total_dot_product);
+
+    MPI_Finalize();
+    return 0;
+}
+
+
+
+
+
+// Question 7
+
+
+#include <mpi.h>
+#include <stdio.h>
+
+#define N 8
+
+int main(int argc, char* argv[]) {
+    int rank, size, arr[N], prefix_sum = 0;
+
+    MPI_Init(&argc, &argv);
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    arr[rank] = rank + 1;
+    MPI_Scan(&arr[rank], &prefix_sum, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+
+    printf("Rank %d: Prefix sum = %d\n", rank, prefix_sum);
+
+    MPI_Finalize();
+    return 0;
+}
+
+
+
+
+// Question 8 
+#include <mpi.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+#define MATRIX_SIZE 4
+
+int main(int argc, char* argv[]) {
+    int rank, num_procs;
+    double matrix[MATRIX_SIZE][MATRIX_SIZE], transposed[MATRIX_SIZE][MATRIX_SIZE];
+    
+    MPI_Init(&argc, &argv);
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &num_procs);
+
+    int rows_per_proc = MATRIX_SIZE / num_procs;
+    double local_matrix[rows_per_proc][MATRIX_SIZE], local_transposed[MATRIX_SIZE][rows_per_proc];
+    
+    if (rank == 0) {
+        for (int i = 0; i < MATRIX_SIZE; i++) {
+            for (int j = 0; j < MATRIX_SIZE; j++) {
+                matrix[i][j] = i * MATRIX_SIZE + j + 1;
+            }
+        }
+    }
+
+    MPI_Bcast(matrix, MATRIX_SIZE * MATRIX_SIZE, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    MPI_Scatter(matrix, rows_per_proc * MATRIX_SIZE, MPI_DOUBLE, local_matrix, rows_per_proc * MATRIX_SIZE, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    
+    for (int i = 0; i < rows_per_proc; i++) {
+        for (int j = 0; j < MATRIX_SIZE; j++) {
+            local_transposed[j][i] = local_matrix[i][j];
+        }
+    }
+    
+    MPI_Gather(local_transposed, rows_per_proc * MATRIX_SIZE, MPI_DOUBLE, transposed, rows_per_proc * MATRIX_SIZE, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    
+    if (rank == 0) {
+        printf("Transposed Matrix:\n");
+        for (int i = 0; i < MATRIX_SIZE; i++) {
+            for (int j = 0; j < MATRIX_SIZE; j++) {
+                printf("%.2lf ", transposed[i][j]);
+            }
+            printf("\n");
+        }
+    }
+    
+    MPI_Finalize();
+    return 0;
+}
+
+
+
+
+
+
+
