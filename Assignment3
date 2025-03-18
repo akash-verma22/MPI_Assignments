@@ -1,0 +1,234 @@
+// Question 1
+#include <mpi.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+#define ARRAY_SIZE (1 << 16)  // 2^16 elements
+
+void perform_daxpy(double scalar, double *vector_X, double *vector_Y, int start_index, int end_index) {
+    for (int i = start_index; i < end_index; i++) {
+        vector_X[i] = scalar * vector_X[i] + vector_Y[i];
+    }
+}
+
+int main(int argc, char *argv[]) {
+    int process_rank, total_processes;
+    double scalar_value = 2.5;
+    double *vector_X, *vector_Y;
+    
+    MPI_Init(&argc, &argv);
+    MPI_Comm_rank(MPI_COMM_WORLD, &process_rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &total_processes);
+
+    int segment_size = ARRAY_SIZE / total_processes;
+    int start_index = process_rank * segment_size;
+    int end_index = start_index + segment_size;
+
+    if (process_rank == 0) {
+        vector_X = (double *)malloc(ARRAY_SIZE * sizeof(double));
+        vector_Y = (double *)malloc(ARRAY_SIZE * sizeof(double));
+        for (int i = 0; i < ARRAY_SIZE; i++) {
+            vector_X[i] = (double)i;
+            vector_Y[i] = (double)(i * 2);
+        }
+    }
+
+    double *local_X = (double *)malloc(segment_size * sizeof(double));
+    double *local_Y = (double *)malloc(segment_size * sizeof(double));
+
+    MPI_Scatter(vector_X, segment_size, MPI_DOUBLE, local_X, segment_size, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    MPI_Scatter(vector_Y, segment_size, MPI_DOUBLE, local_Y, segment_size, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+
+    double computation_start = MPI_Wtime();
+    perform_daxpy(scalar_value, local_X, local_Y, 0, segment_size);
+    double local_execution_time = MPI_Wtime() - computation_start;
+
+    double max_execution_time;
+    MPI_Reduce(&local_execution_time, &max_execution_time, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+
+    MPI_Gather(local_X, segment_size, MPI_DOUBLE, vector_X, segment_size, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+
+    if (process_rank == 0) {
+        printf("DAXPY operation completed in %f seconds\n", max_execution_time);
+        free(vector_X);
+        free(vector_Y);
+    }
+
+    free(local_X);
+    free(local_Y);
+    
+    MPI_Finalize();
+    return 0;
+}
+
+
+
+
+// Question 2 
+#include <mpi.h>
+#include <stdio.h>
+
+#define TOTAL_STEPS 1000000
+
+double step_size;
+
+int main(int argc, char *argv[]) {
+    int process_rank, total_processes;
+    double local_sum = 0.0, final_pi, accumulated_sum = 0.0;
+
+    MPI_Init(&argc, &argv);
+    MPI_Comm_rank(MPI_COMM_WORLD, &process_rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &total_processes);
+
+    if (process_rank == 0) step_size = 1.0 / (double)TOTAL_STEPS;
+    MPI_Bcast(&step_size, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+
+    for (int i = process_rank; i < TOTAL_STEPS; i += total_processes) {
+        double x_value = (i + 0.5) * step_size;
+        local_sum += 4.0 / (1.0 + x_value * x_value);
+    }
+
+    MPI_Reduce(&local_sum, &accumulated_sum, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+
+    if (process_rank == 0) {
+        final_pi = step_size * accumulated_sum;
+        printf("Approximated Value of Pi = %.15f\n", final_pi);
+    }
+
+    MPI_Finalize();
+    return 0;
+}
+
+
+// Question 3
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <math.h>
+#include <mpi.h>
+#include <stdbool.h>
+
+// Function to check if a number is prime
+bool is_prime(int n) {
+    if (n <= 1) return false;
+    if (n <= 3) return true;
+    if (n % 2 == 0 || n % 3 == 0) return false;
+    
+    int i = 5;
+    while (i * i <= n) {
+        if (n % i == 0 || n % (i + 2) == 0) {
+            return false;
+        }
+        i += 6;
+    }
+    return true;
+}
+
+int main(int argc, char** argv) {
+    int rank, size, max_value;
+    int number, result;
+    int primes_found = 0;
+    
+    // Initialize MPI
+    MPI_Init(&argc, &argv);
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    
+    if (size < 2) {
+        printf("This program requires at least 2 processes\n");
+        MPI_Finalize();
+        return 1;
+    }
+    
+    // Master process
+    if (rank == 0) {
+        // Check for command line argument for max value
+        if (argc > 1) {
+            max_value = atoi(argv[1]);
+        } else {
+            max_value = 100; // Default value
+        }
+        
+        printf("Finding primes up to %d using %d processes\n", max_value, size);
+        
+        int next_number = 2;
+        int active_slaves = size - 1;
+        int* primes = malloc(max_value * sizeof(int));
+        
+        // First, send initial numbers to all slaves
+        for (int i = 1; i < size; i++) {
+            if (next_number <= max_value) {
+                MPI_Send(&next_number, 1, MPI_INT, i, 0, MPI_COMM_WORLD);
+                next_number++;
+            } else {
+                // No more numbers to test, send termination signal (0)
+                int terminate = 0;
+                MPI_Send(&terminate, 1, MPI_INT, i, 0, MPI_COMM_WORLD);
+                active_slaves--;
+            }
+        }
+        
+        // Process results and send new numbers
+        while (active_slaves > 0) {
+            MPI_Status status;
+            
+            // Receive a result from any slave
+            MPI_Recv(&result, 1, MPI_INT, MPI_ANY_SOURCE, 0, MPI_COMM_WORLD, &status);
+            
+            // Determine what to do based on the received result
+            if (result > 0) {
+                // This is a prime
+                printf("Found prime: %d\n", result);
+                primes[primes_found++] = result;
+            } else if (result < 0) {
+                // This is a non-prime (sent as negative)
+                printf("%d is not prime\n", -result);
+            }
+            
+            // Send next number to the requesting slave
+            if (next_number <= max_value) {
+                MPI_Send(&next_number, 1, MPI_INT, status.MPI_SOURCE, 0, MPI_COMM_WORLD);
+                next_number++;
+            } else {
+                // No more numbers to test, send termination signal (0)
+                int terminate = 0;
+                MPI_Send(&terminate, 1, MPI_INT, status.MPI_SOURCE, 0, MPI_COMM_WORLD);
+                active_slaves--;
+            }
+        }
+        
+        // Print the final list of primes
+        printf("\nFound %d primes: ", primes_found);
+        for (int i = 0; i < primes_found; i++) {
+            printf("%d ", primes[i]);
+        }
+        printf("\n");
+        
+        free(primes);
+    }
+    // Slave processes
+    else {
+        while (1) {
+            // Receive a number to test
+            MPI_Recv(&number, 1, MPI_INT, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            
+            // Check for termination signal
+            if (number == 0) {
+                break;
+            }
+            
+            // Test if the number is prime
+            if (is_prime(number)) {
+                result = number;  // Send back as positive if prime
+            } else {
+                result = -number; // Send back as negative if not prime
+            }
+            
+            // Send result to master
+            MPI_Send(&result, 1, MPI_INT, 0, 0, MPI_COMM_WORLD);
+        }
+    }
+    
+    MPI_Finalize();
+    return 0;
+}
